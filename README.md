@@ -8,9 +8,9 @@
 
 | 폴더 | 원본 저장소 | 역할 |
 | --- | --- | --- |
-| [`plugin/`](plugin/) | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | Claude Code와 Codex에서 질문에 맞는 SQL을 검사하고 읽기 전용으로 실행합니다. Ossie 지표 정의를 직접 사용할 수 있습니다. |
-| [`semantic-definitions/`](semantic-definitions/) | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 시맨틱 모델, 업무 개념, 매핑을 관리하고 정의와 물리 컬럼의 계보를 Neo4j에 게시합니다. |
-| [`mcp/`](mcp/) | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j에 게시된 현재 정의와 계보를 읽기 전용으로 조회하는 MCP 서버입니다. |
+| `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | Claude Code와 Codex에서 질문에 맞는 SQL을 검사하고 읽기 전용으로 실행합니다. Ossie 지표 정의를 직접 사용할 수 있습니다. |
+| `semantic-definitions/` | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 시맨틱 모델, 업무 개념, 매핑을 관리하고 정의와 물리 컬럼의 계보를 Neo4j에 게시합니다. |
+| `mcp/` | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j에 게시된 현재 정의와 계보를 읽기 전용으로 조회하는 MCP 서버입니다. |
 
 평가셋과 실험 기록은 [text-to-sql-study](https://github.com/zisu17/text-to-sql-study)에 있습니다. 이 저장소는 **Private**이며 접근 권한이 있는 사람만 열 수 있습니다. 공개 저장소를 누구나 복제할 수 있도록 Submodule에는 포함하지 않았습니다.
 
@@ -43,9 +43,9 @@ cd text2sql
 
 이미 상위 저장소만 복제했다면 `git submodule update --init --recursive`를 실행합니다. 설치와 실행 환경은 각 컴포넌트의 안내를 따릅니다.
 
-1. [플러그인 설치와 DB 연결](plugin/README.md)
-2. [시맨틱 정의 작성과 그래프 게시](semantic-definitions/README.md)
-3. [Neo4j 그래프 MCP 실행](mcp/README.md)
+1. [플러그인 설치와 DB 연결](https://github.com/zisu17/text2sql-plugin#readme)
+2. [시맨틱 정의 작성과 그래프 게시](https://github.com/zisu17/semantic-definitions#readme)
+3. [Neo4j 그래프 MCP 실행](https://github.com/zisu17/text2sql-mcp#readme)
 
 ## Submodule 버전 갱신
 
