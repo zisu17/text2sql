@@ -9,7 +9,7 @@
 | 폴더 | 원본 저장소 | 역할 |
 | --- | --- | --- |
 | `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | Claude Code와 Codex에서 질문에 맞는 SQL을 검사하고 읽기 전용으로 실행합니다. Ossie 지표 정의를 직접 사용할 수 있습니다. |
-| `semantic-definitions/` | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 시맨틱 모델, 업무 개념, 매핑을 관리하고 정의와 물리 컬럼의 계보를 Neo4j에 게시합니다. |
+| `semantic-definitions/` | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 시맨틱 모델, 업무 개념, 매핑을 관리합니다. Ossie 정의와 물리 컬럼의 계보를 Neo4j에 게시합니다. |
 | `mcp/` | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j에 게시된 현재 정의와 계보를 읽기 전용으로 조회하는 MCP 서버입니다. |
 
 평가셋과 실험 기록은 [text-to-sql-study](https://github.com/zisu17/text-to-sql-study)에 있습니다. 이 저장소는 **Private**이며 접근 권한이 있는 사람만 열 수 있습니다. 공개 저장소를 누구나 복제할 수 있도록 Submodule에는 포함하지 않았습니다.
@@ -18,19 +18,21 @@
 
 ```mermaid
 flowchart LR
-    S[semantic-definitions<br/>Ossie · Ontology · Mapping]
+    O[Ossie 시맨틱 모델]
+    C[Ontology · Mapping]
     P[text2sql-plugin<br/>SQL 검사 · 읽기 전용 실행]
     DB[(원본 DB)]
     G[(Neo4j 계보 그래프)]
     M[text2sql-mcp<br/>정의 · 계보 조회]
 
-    S -->|Ossie 정의 파일| P
+    O -->|Ossie 정의 파일| P
+    C -->|로컬 업무 개념 요약| P
     P -->|검사된 SQL| DB
-    S -->|검증 후 게시| G
+    O -->|검증 후 게시| G
     G -->|읽기 전용 조회| M
 ```
 
-현재 SQL 실행은 플러그인이 Ossie 정의를 직접 읽는 방식입니다. 그래프 MCP는 게시된 정의와 계보를 조회하는 별도 도구이며 플러그인의 SQL 실행 경로에 자동으로 연결되지는 않습니다.
+현재 SQL 실행은 플러그인이 Ossie 정의를 직접 읽는 방식입니다. 온톨로지와 매핑은 로컬 `t2s context`의 업무 개념 요약에 쓰이며 그래프에는 게시되지 않습니다. 그래프 MCP는 게시된 Ossie 정의와 계보를 조회하는 별도 도구이며 플러그인의 SQL 실행 경로에 자동으로 연결되지는 않습니다.
 
 ## 시작하기
 
