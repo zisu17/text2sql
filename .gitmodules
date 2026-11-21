@@ -1,0 +1,12 @@
+[submodule "plugin"]
+	path = plugin
+	url = https://github.com/zisu17/text2sql-plugin.git
+	branch = main
+[submodule "mcp"]
+	path = mcp
+	url = https://github.com/zisu17/text2sql-mcp.git
+	branch = main
+[submodule "semantic-definitions"]
+	path = semantic-definitions
+	url = https://github.com/zisu17/semantic-definitions.git
+	branch = main
