@@ -16,20 +16,20 @@
 | 폴더 | 원본 저장소 | 책임 |
 | --- | --- | --- |
 | `semantic-definitions/` | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 모델·업무 개념의 정본을 관리하고 모델과 물리 계보를 Neo4j에 게시 |
-| `mcp/` | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j의 활성 모델·승인 상태·계보를 읽기 전용 MCP 도구로 제공 |
-| `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | Graph MCP의 활성 모델로 SQL을 만들고 검사한 뒤 원본 DB에서 읽기 전용으로 실행 |
+| `mcp/` | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j의 활성 모델을 읽기 전용 MCP 도구로 제공. 정의 검색(BM25), 조인 경로, 계보 조회 |
+| `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | 에이전트가 쓴 SQL에 정의된 지표(`AGG`)를 펼치고 검사한 뒤 원본 DB에서 읽기 전용으로 실행 |
 
 ```mermaid
 flowchart LR
     Y[Ossie 정의 파일<br/>작성·검증의 정본] --> P[semantic-graph<br/>plan · publish]
     D[(원본 DB)] -->|카탈로그 확인| P
     P --> G[(Neo4j 활성 모델·계보)]
-    G --> M[Graph MCP<br/>정의·승인·계보 조회]
-    M --> T[text2sql 플러그인<br/>SQL 생성·검사]
+    G --> M[Graph MCP<br/>정의 검색·조인 경로·계보]
+    M --> T[text2sql 플러그인<br/>SQL 작성·지표 펼치기·검사]
     T -->|읽기 전용 쿼리| D
 ```
 
-일반 질문의 시맨틱 조회와 SQL 생성은 **Graph MCP의 활성 모델**을 사용합니다. 로컬 Ossie 파일은 정의를 작성·검증·게시할 때만 사용합니다. 실제 지표 값이나 행을 읽으려면 플러그인에 원본 DB의 읽기 전용 `DATABASE_URL`도 필요합니다. MCP 서버 자체는 원본 DB 행을 조회하지 않습니다. Ontology·Mapping 파일은 정의 저장소에서 관리하며 현재 그래프 게시 범위에는 포함하지 않습니다.
+일반 질문에서 지표·필드·연결은 **Graph MCP의 활성 모델**에서 찾습니다(전문 검색 BM25). SQL은 에이전트가 직접 쓰고, 정의된 지표는 `AGG(별칭.지표)`로 넣어 플러그인의 `t2s`가 활성 모델의 정의대로 펼칩니다. 승인 안 된 연결이나 정의 밖 테이블도 막지 않고 경고와 함께 실행합니다. 로컬 Ossie 파일은 정의를 작성·검증·게시할 때만 사용합니다. 실제 지표 값이나 행을 읽으려면 플러그인에 원본 DB의 읽기 전용 `DATABASE_URL`도 필요합니다. MCP 서버 자체는 원본 DB 행을 조회하지 않습니다. Ontology·Mapping 파일은 정의 저장소에서 관리하며 현재 그래프 게시 범위에는 포함하지 않습니다.
 
 ## 문서 지도
 
