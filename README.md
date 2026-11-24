@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | `semantic-definitions/` | [semantic-definitions](https://github.com/zisu17/semantic-definitions) | Ossie 모델·업무 개념의 정본을 관리하고 모델과 물리 계보를 Neo4j에 게시 |
 | `mcp/` | [text2sql-mcp](https://github.com/zisu17/text2sql-mcp) | Neo4j의 활성 모델을 읽기 전용 MCP 도구로 제공. 정의 검색(BM25), 조인 경로, 계보 조회 |
-| `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | 에이전트가 쓴 SQL에 정의된 지표(`AGG`)를 펼치고 검사한 뒤 원본 DB에서 읽기 전용으로 실행 |
+| `plugin/` | [text2sql-plugin](https://github.com/zisu17/text2sql-plugin) | 승인 지표를 컴파일하고 복합 SQL의 지표(`AGG`)를 펼쳐 원본 DB에서 읽기 전용으로 실행 |
 
 ```mermaid
 flowchart LR
@@ -29,7 +29,7 @@ flowchart LR
     T -->|읽기 전용 쿼리| D
 ```
 
-일반 질문에서 지표·필드·연결은 **Graph MCP의 활성 모델**에서 찾습니다(전문 검색 BM25). SQL은 에이전트가 직접 쓰고, 정의된 지표는 `AGG(별칭.지표)`로 넣어 플러그인의 `t2s`가 활성 모델의 정의대로 펼칩니다. 승인 안 된 연결이나 정의 밖 테이블도 막지 않고 경고와 함께 실행합니다. 로컬 Ossie 파일은 정의를 작성·검증·게시할 때만 사용합니다. 실제 지표 값이나 행을 읽으려면 플러그인에 원본 DB의 읽기 전용 `DATABASE_URL`도 필요합니다. MCP 서버 자체는 원본 DB 행을 조회하지 않습니다. Ontology·Mapping 파일은 정의 저장소에서 관리하며 현재 그래프 게시 범위에는 포함하지 않습니다.
+일반 질문에서 지표·필드·연결은 **Graph MCP의 활성 모델**에서 찾습니다(전문 검색 BM25). 같은 뜻의 승인 지표는 `t2s compile --run`으로 계산합니다. 직접 집계와 지표를 섞거나 하위 쿼리가 필요한 경우에는 SQL을 작성하고 지표를 `AGG(별칭.지표)`로 넣습니다. 승인 안 된 연결이나 정의 밖 테이블도 막지 않고 경고와 함께 실행합니다. 로컬 Ossie 파일은 정의를 작성·검증·게시할 때만 사용합니다. 실제 지표 값이나 행을 읽으려면 플러그인에 원본 DB의 읽기 전용 `DATABASE_URL`도 필요합니다. MCP 서버 자체는 원본 DB 행을 조회하지 않습니다. Ontology·Mapping 파일은 정의 저장소에서 관리하며 현재 그래프 게시 범위에는 포함하지 않습니다.
 
 ## 문서 지도
 
