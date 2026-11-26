@@ -24,6 +24,12 @@ GRAPH_TOOLS = (
 )
 MAX_ATTEMPTS = 4  # Initial submission and the three corrections allowed by ask.
 RESULT = re.compile(r"(?:^|\n)RESULT ([1-4])\s*$")
+IDENTIFIER = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?")
+CHECK_ROUTES = ("context", "schema", "validate", "values")
+USER_CONFIRMATION = (
+    "이 질문에는 평가 도구에 연결된 읽기 전용 로컬 DB를 사용해 주세요. 이 DB를 데이터 출처로 지정합니다. "
+    "답에 사용할 쿼리는 도구로 실행해 주세요. 결과 행은 로컬 채점기가 확인하므로 답변에 값을 적을 필요는 없습니다."
+)
 BOOT = """
 import json, os
 from pathlib import Path
@@ -47,12 +53,14 @@ def append_record(path, result):
         stream.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
-def arguments(route, sql, metrics, by, where, order, limit, expr):
-    if route in ("sql", "run") and isinstance(sql, str) and sql.strip():
-        return [route, "-"], sql
-    if route != "compile" or not metrics or not all(re.fullmatch(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?", m) for m in metrics):
+def arguments(route, sql, metrics, by, where, order, limit, expr, read, preview):
+    if route in ("sql", "run", "validate"):
+        if not sql or not sql.strip():
+            raise ValueError(f"Provide a SELECT for {route}")
+        return [route, "-", *([f"--read={read}"] if read else [])], sql
+    if route != "compile" or not metrics or not all(IDENTIFIER.fullmatch(m) for m in metrics):
         raise ValueError("Use sql or run with a SELECT, or compile with registered metric names")
-    args = ["compile", "--run", *metrics]
+    args = ["compile", *([] if preview else ["--run"]), *metrics]
     for name, values in (("by", by), ("where", where), ("order", order)):
         args.extend(f"--{name}={value}" for value in values or [])
     if limit is not None:
@@ -64,7 +72,7 @@ def arguments(route, sql, metrics, by, where, order, limit, expr):
     return args, None
 
 
-def execute(case, args, sql):
+def call_t2s(case, args, sql=None):
     env = {
         **os.environ, "PYTHONPATH": os.pathsep.join((case["plugin"], *case["extra_pythonpath"])),
         "ASK_EVAL_SNAPSHOT": case["snapshot"], "GRAPH_MODEL": case["model"],
@@ -76,9 +84,12 @@ def execute(case, args, sql):
     proc = subprocess.run([case["runtime"], "-c", BOOT, *args], env=env, cwd=case["plugin"],
                           input=sql, text=True, capture_output=True, timeout=55)
     try:
-        payload = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError("Local t2s did not return JSON") from error
+
+
+def execution_result(payload):
     result = payload.get("result", payload)
     return {
         "ok": bool(result.get("ok") and not result.get("truncated")),
@@ -95,32 +106,80 @@ def model_result(result):
     return output
 
 
+def tool_error(code, message):
+    return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def check_result(case, route, args, sql, tables, datasets):
+    if route == "values":
+        return tool_error("values_unavailable", "Use the question and Graph definitions to confirm values in this evaluation.")
+    if route == "context":
+        if any(not IDENTIFIER.fullmatch(name) for name in datasets or []):
+            raise ValueError("Provide registered dataset names")
+        args = ["context"]
+        if datasets and case["scoped_context"]:
+            args.append("--datasets=" + ",".join(datasets))
+        payload = call_t2s(case, args)
+        result = {key: payload[key] for key in ("dialect", "schema", "max_rows", "readonly_guarantee", "definition", "tables", "error") if key in payload}
+        if datasets and case["scoped_context"] and "catalog" in payload:
+            result["catalog"] = payload["catalog"]
+        elif "error" not in result:
+            result["message"] = "Use graph_get_dataset for selected semantic definitions."
+        if "error" not in result:
+            result["database_source"] = "The user selected the connected read-only local database."
+        return result
+    if route == "schema":
+        if any(not IDENTIFIER.fullmatch(name) for name in tables or []):
+            raise ValueError("Provide table names without options")
+        payload = call_t2s(case, ["schema", *(tables or [])])
+        return {key: payload[key] for key in ("tables", "describe", "outside_definition", "error") if key in payload}
+    payload = call_t2s(case, args, sql)
+    keys = ("ok", "sql", "problems", "error", "warnings", "joins", "filters", "group_by")
+    return {key: payload[key] for key in keys if key in payload}
+
+
 def serve():
     from mcp.server.mcpserver import MCPServer
 
     case = json.loads(Path(os.environ["ASK_EVAL_CASE"]).read_text())
     attempts = Path(case["attempts"])
+    checks = Path(case["checks"])
     server = MCPServer("local-t2s")
     lock = Lock()
 
     @server.tool(structured_output=True)
     def t2s(route: str, sql: str | None = None, metrics: list[str] | None = None,
             by: list[str] | None = None, where: list[str] | None = None, order: list[str] | None = None,
-            limit: int | None = None, expr: str | None = None) -> dict[str, Any]:
-        """Run t2s compile, sql, or run locally and return output column labels or diagnostics."""
+            limit: int | None = None, expr: str | None = None, read: str | None = None,
+            tables: list[str] | None = None, datasets: list[str] | None = None,
+            preview: bool = False) -> dict[str, Any]:
+        """Inspect context, schema or a query, or execute t2s compile, sql or run locally."""
+        if route in ("compile --run", "compile_run"):
+            route, preview = "compile", False
         with lock:
+            try:
+                args, query = ([], None) if route in ("context", "schema", "values") else arguments(
+                    route, sql, metrics, by, where, order, limit, expr, read, preview)
+            except ValueError as error:
+                append_record(checks, {"route": route, "issue": "bad_args"})
+                return tool_error("bad_args", str(error))
+            if route in CHECK_ROUTES or (route == "compile" and preview):
+                try:
+                    result = check_result(case, route, args, query, tables, datasets)
+                except ValueError as error:
+                    result = tool_error("bad_args", str(error))
+                except subprocess.TimeoutExpired:
+                    result = tool_error("timeout", "Local metadata check timed out")
+                error = result.get("error") or {}
+                append_record(checks, {"route": route, "issue": error.get("code") or error.get("kind")})
+                return result
             index = len(read_records(attempts)) + 1
             if index > MAX_ATTEMPTS:
-                return {"ok": False, "error": {"code": "attempt_limit", "message": "Use the best completed attempt."}}
+                return tool_error("attempt_limit", "Use the best completed attempt.")
             try:
-                args, query = arguments(route, sql, metrics, by, where, order, limit, expr)
-                result = execute(case, args, query)
-            except ValueError as error:
-                result = {"ok": False, "error": {"code": "bad_args", "message": str(error)[:300]},
-                          "columns": None, "rows": None, "warnings": [], "truncated": False}
+                result = execution_result(call_t2s(case, args, query))
             except subprocess.TimeoutExpired:
-                result = {"ok": False, "error": {"code": "timeout", "message": "Local execution timed out"},
-                          "columns": None, "rows": None, "warnings": [], "truncated": False}
+                result = execution_result(tool_error("timeout", "Local execution timed out"))
             result.update(attempt=index, route=route)
             append_record(attempts, result)
         return model_result(result)
@@ -140,20 +199,28 @@ def generate(args, item, plugin, snapshot, provider, prompt):
         work = folder / "work"
         work.mkdir()
         instructions = folder / "instructions.txt"
+        skill = (plugin / "skills/ask/SKILL.md").read_text()
         instructions.write_text(
-            (plugin / "skills/ask/SKILL.md").read_text()
-            + "\n평가 환경에서 DB와 모델은 이미 정해져 있다. 제공된 Graph MCP 도구로 필요한 정의를 직접 찾는다. "
-              "DDL을 실제 DB 스키마로 사용한다. t2s compile --run, sql, run은 local-t2s의 t2s 도구로 호출한다. "
+            skill
+            + "\n사용자가 연결된 읽기 전용 로컬 DB를 지정했다. 데이터 출처는 확인되었으므로 다시 묻지 않는다. "
+              "Graph 모델은 이미 정해져 있다. 제공된 Graph MCP 도구로 필요한 정의를 직접 찾는다. "
+              "DDL을 실제 DB 스키마로 사용한다. t2s 명령은 local-t2s의 t2s 도구로 호출한다. "
+              "context의 datasets와 schema의 tables는 이름 목록으로 준다. context의 전체 catalog는 제공하지 않는다. "
+              "context, schema, validate와 compile의 preview는 점검이다. 필터 값은 질문과 Graph 정의에서 확인한다. "
+              "compile --run은 preview 없이 호출한다. compile --run, sql, run만 질의 실행 횟수로 센다. "
               "이 도구는 각 실행의 열 이름과 오류를 돌려준다. 요청한 출력과 대조하고 필요하면 같은 도구로 고쳐 실행한다. "
               "마지막 실행 결과를 답에 사용한다. 앞선 실행을 선택할 경우에만 마지막 줄에 RESULT 1처럼 그 번호를 적는다. "
-              "리뷰가 필요하면 같은 대화에서 직접 점검한다. DB 결과의 값은 로컬에서 처리된다.\n"
+              "리뷰가 필요하면 같은 대화에서 직접 점검한다. DB 결과의 값은 로컬에서 처리된다. "
+              "결과 값을 보려고 SQL을 바꾸거나 실행 결과를 다른 형태로 감싸지 않는다.\n"
         )
         case_path = folder / "case.json"
         attempts = folder / "attempts.jsonl"
+        checks = folder / "checks.jsonl"
         case_path.write_text(json.dumps({
             "runtime": str(args.runtime), "snapshot": str(args.snapshot), "db": str(args.study / "data/olist.db"),
             "plugin": str(plugin), "model": snapshot["model"], "version": snapshot["version_id"],
-            "extra_pythonpath": args.extra_pythonpath, "attempts": str(attempts),
+            "extra_pythonpath": args.extra_pythonpath, "attempts": str(attempts), "checks": str(checks),
+            "scoped_context": "context --datasets" in skill,
         }))
         command = provider.command(work, instructions)
         add_server(command, graph_name, {
@@ -171,7 +238,8 @@ def generate(args, item, plugin, snapshot, provider, prompt):
         env = {**os.environ, "ASK_EVAL_CASE": str(case_path)}
         for key in ("DATABASE_URL", "OPENAI_API_KEY", "NEO4J_PASSWORD", "NEO4J_AUTH", "MCP_API_TOKEN"):
             env.pop(key, None)
-        proc = subprocess.run(command, input=prompt, env=env, text=True, capture_output=True, timeout=args.timeout)
+        confirmed_prompt = f"{prompt}\n\n{USER_CONFIRMATION}"
+        proc = subprocess.run(command, input=confirmed_prompt, env=env, text=True, capture_output=True, timeout=args.timeout)
         events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
         if proc.returncode or not any(e["type"] == "turn.completed" for e in events):
             failures = [str(e.get("error") or e.get("message") or "") for e in events
@@ -200,7 +268,9 @@ def generate(args, item, plugin, snapshot, provider, prompt):
             picked = next((r for r in local_results if r["attempt"] == int(match[1])), None)
         return {
             "id": item["id"], "attempts": local_results, "final": picked,
-            "graph_calls": len(seen), "prompt_sha256": sha256(prompt.encode()).hexdigest(),
+            "checks": read_records(checks),
+            "graph_calls": len(seen), "prompt_sha256": sha256(confirmed_prompt.encode()).hexdigest(),
+            **({"no_execution_reply": messages[-1]} if not local_results and messages else {}),
         }
 
 
@@ -235,6 +305,7 @@ def main():
     gold = {r["id"]: r for r in json.loads(gold_path.read_text())}
     provider = CodexGenerator("gpt-6-luna", "medium")
     provider_info = provider.preflight()
+    provider_info["tool_policy"] = "allowlisted local Graph and t2s tools; DB result rows withheld"
     items = select_inputs(args.ids)
     plugins = {"nov22": args.old_plugin, "updated": args.new_plugin}
     identity = {"provider": provider_info, "version": snapshot["version_id"], "db": frozen["db_sha256"],
@@ -267,7 +338,8 @@ def main():
                 error = (result or {}).get("error") or {}
                 return False, error.get("code") or error.get("kind") or "no_executed_result"
             record.update(arm=arm, first=grade(attempts[0] if attempts else None), score=grade(final),
-                          attempts=len(attempts), final_attempt=(final or {}).get("attempt"))
+                          attempts=len(attempts), final_attempt=(final or {}).get("attempt"),
+                          attempt_scores=[{"route": attempt["route"], "score": grade(attempt)} for attempt in attempts])
             return record
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:
             return {"arm": arm, "id": item["id"], "infrastructure_error": type(error).__name__, "reason": str(error)[:550]}
