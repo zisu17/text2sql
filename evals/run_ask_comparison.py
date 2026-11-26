@@ -145,7 +145,7 @@ def generate(args, item, plugin, snapshot, provider, prompt):
             + "\n평가 환경에서 DB와 모델은 이미 정해져 있다. 제공된 Graph MCP 도구로 필요한 정의를 직접 찾는다. "
               "DDL을 실제 DB 스키마로 사용한다. t2s compile --run, sql, run은 local-t2s의 t2s 도구로 호출한다. "
               "이 도구는 각 실행의 열 이름과 오류를 돌려준다. 요청한 출력과 대조하고 필요하면 같은 도구로 고쳐 실행한다. "
-              "최종 답변은 선택한 실행 번호를 RESULT 1 같은 형식으로 마지막 줄에 적는다. "
+              "마지막 실행 결과를 답에 사용한다. 앞선 실행을 선택할 경우에만 마지막 줄에 RESULT 1처럼 그 번호를 적는다. "
               "리뷰가 필요하면 같은 대화에서 직접 점검한다. DB 결과의 값은 로컬에서 처리된다.\n"
         )
         case_path = folder / "case.json"
@@ -174,7 +174,12 @@ def generate(args, item, plugin, snapshot, provider, prompt):
         proc = subprocess.run(command, input=prompt, env=env, text=True, capture_output=True, timeout=args.timeout)
         events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
         if proc.returncode or not any(e["type"] == "turn.completed" for e in events):
-            raise RuntimeError(f"Model process incomplete ({proc.returncode})")
+            failures = [str(e.get("error") or e.get("message") or "") for e in events
+                        if e.get("type") in ("error", "turn.failed")]
+            detail = (failures or proc.stderr.strip().splitlines() or [""])[-1]
+            if token := env.get("TEXT2SQL_MCP_TOKEN"):
+                detail = detail.replace(token, "[redacted]")
+            raise RuntimeError(f"Model process incomplete ({proc.returncode}): {detail[-500:]}")
         messages = [e["item"]["text"] for e in events if e["type"] == "item.completed"
                     and e.get("item", {}).get("type") == "agent_message"]
         seen = [e["item"] for e in events if e["type"] == "item.completed"
@@ -190,7 +195,9 @@ def generate(args, item, plugin, snapshot, provider, prompt):
                     raise RuntimeError("Graph tools returned a different active version")
         match = RESULT.search(messages[-1]) if messages else None
         local_results = read_records(attempts)
-        picked = next((r for r in local_results if match and r["attempt"] == int(match[1])), None)
+        picked = local_results[-1] if local_results else None
+        if match:
+            picked = next((r for r in local_results if r["attempt"] == int(match[1])), None)
         return {
             "id": item["id"], "attempts": local_results, "final": picked,
             "graph_calls": len(seen), "prompt_sha256": sha256(prompt.encode()).hexdigest(),
@@ -199,10 +206,13 @@ def generate(args, item, plugin, snapshot, provider, prompt):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("study", "old-plugin", "new-plugin", "snapshot", "runtime", "tool-runtime", "out"):
+    for name in ("study", "old-plugin", "new-plugin", "snapshot", "out"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).resolve(), required=True)
+    for name in ("runtime", "tool-runtime"):
+        # Preserve the venv entry point even when it is a symlink to the base Python.
+        parser.add_argument(f"--{name}", type=lambda value: Path(value).expanduser().absolute(), required=True)
     parser.add_argument("--graph-url", required=True)
-    parser.add_argument("--extra-pythonpath", action="append", default=[])
+    parser.add_argument("--extra-pythonpath", action="append", type=lambda value: str(Path(value).expanduser().absolute()), default=[])
     parser.add_argument("--ids", nargs="+")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=240)
@@ -260,7 +270,7 @@ def main():
                           attempts=len(attempts), final_attempt=(final or {}).get("attempt"))
             return record
         except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as error:
-            return {"arm": arm, "id": item["id"], "infrastructure_error": type(error).__name__, "reason": str(error)[:200]}
+            return {"arm": arm, "id": item["id"], "infrastructure_error": type(error).__name__, "reason": str(error)[:550]}
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for future in as_completed(pool.submit(run, job) for job in jobs):
