@@ -30,18 +30,8 @@ USER_CONFIRMATION = (
     "이 질문에는 평가 도구에 연결된 읽기 전용 로컬 DB를 사용해 주세요. 이 DB를 데이터 출처로 지정합니다. "
     "답에 사용할 쿼리는 도구로 실행해 주세요. 결과 행은 로컬 채점기가 확인하므로 답변에 값을 적을 필요는 없습니다."
 )
-BOOT = """
-import json, os
-from pathlib import Path
-from t2s import cli
-snapshot = json.loads(Path(os.environ["ASK_EVAL_SNAPSHOT"]).read_text())
-def fixed_snapshot(model):
-    if model not in (None, snapshot["model"]):
-        raise cli.GraphClientError("Unexpected model in this evaluation")
-    return snapshot
-cli.fetch_model = fixed_snapshot
-cli.main()
-"""
+# t2s asks the local Graph server for the definitions each command touches (POST /definition).
+BOOT = "from t2s import cli; cli.main()"
 
 
 def read_records(path):
@@ -75,7 +65,8 @@ def arguments(route, sql, metrics, by, where, order, limit, expr, read, preview)
 def call_t2s(case, args, sql=None):
     env = {
         **os.environ, "PYTHONPATH": os.pathsep.join((case["plugin"], *case["extra_pythonpath"])),
-        "ASK_EVAL_SNAPSHOT": case["snapshot"], "GRAPH_MODEL": case["model"],
+        "TEXT2SQL_MCP_URL": case["graph_url"], "TEXT2SQL_MCP_TOKEN": Path(case["token_file"]).read_text(),
+        "GRAPH_MODEL": case["model"],
         "GRAPH_VERSION_ID": case["version"], "DATABASE_URL": f"sqlite:///file:{case['db']}?mode=ro&uri=true",
         "QUERY_TIMEOUT": "10", "MAX_ROWS": "1000", "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -192,7 +183,7 @@ def add_server(command, name, config):
         command[-1:-1] = ["-c", f"mcp_servers.{name}.{key}={json.dumps(value)}"]
 
 
-def generate(args, item, plugin, snapshot, provider, prompt):
+def generate(args, item, plugin, active, provider, prompt):
     graph_name = "text2sql-graph"
     with tempfile.TemporaryDirectory(prefix="olist-ask-") as folder:
         folder = Path(folder)
@@ -214,11 +205,17 @@ def generate(args, item, plugin, snapshot, provider, prompt):
               "결과 값을 보려고 SQL을 바꾸거나 실행 결과를 다른 형태로 감싸지 않는다.\n"
         )
         case_path = folder / "case.json"
+        # Codex starts local-t2s with only the variables in its config. The model has no shell tool and works
+        # in folder/work, so the Graph token reaches t2s through a file only this user can read.
+        token_file = folder / "graph.token"
+        token_file.touch(mode=0o600)
+        token_file.write_text(os.environ["TEXT2SQL_MCP_TOKEN"])
         attempts = folder / "attempts.jsonl"
         checks = folder / "checks.jsonl"
         case_path.write_text(json.dumps({
-            "runtime": str(args.runtime), "snapshot": str(args.snapshot), "db": str(args.study / "data/olist.db"),
-            "plugin": str(plugin), "model": snapshot["model"], "version": snapshot["version_id"],
+            "runtime": str(args.runtime), "graph_url": args.graph_url, "token_file": str(token_file),
+            "db": str(args.study / "data/olist.db"),
+            "plugin": str(plugin), "model": active["model"], "version": active["version_id"],
             "extra_pythonpath": args.extra_pythonpath, "attempts": str(attempts), "checks": str(checks),
             "scoped_context": "context --datasets" in skill,
         }))
@@ -255,11 +252,14 @@ def generate(args, item, plugin, snapshot, provider, prompt):
         for call in seen:
             result = call.get("result") or {}
             content = result.get("structuredContent") or result.get("structured_content")
-            if not content and not result.get("isError"):
-                block = next((b for b in result.get("content", []) if b["type"] == "text"), None)
-                content = json.loads(block["text"]) if block else None
+            if not content and not (result.get("isError") or result.get("is_error")):
+                block = next((b for b in result.get("content", []) if b.get("type") == "text"), None)
+                try:
+                    content = json.loads(block["text"]) if block else None
+                except ValueError:  # a tool error message, not a result
+                    content = None
             if content and not result.get("isError") and "version_id" in content:
-                if (content.get("version_id"), content.get("model")) != (snapshot["version_id"], snapshot["model"]):
+                if (content.get("version_id"), content.get("model")) != (active["version_id"], active["model"]):
                     raise RuntimeError("Graph tools returned a different active version")
         match = RESULT.search(messages[-1]) if messages else None
         local_results = read_records(attempts)
@@ -274,10 +274,22 @@ def generate(args, item, plugin, snapshot, provider, prompt):
         }
 
 
+def active_version(graph_url, token):
+    """The Graph server's active model and version. Both arms and every tool call must see this one."""
+    import urllib.request
+    base = graph_url.rstrip("/").removesuffix("/mcp")
+    request = urllib.request.Request(f"{base}/definition", data=json.dumps({"definition": False}).encode(),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("study", "old-plugin", "new-plugin", "snapshot", "out"):
+    for name in ("study", "new-plugin", "out"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).resolve(), required=True)
+    parser.add_argument("--old-plugin", type=lambda value: Path(value).resolve(),
+                        help="Second arm. It must read definitions from the same Graph server (POST /definition)")
     for name in ("runtime", "tool-runtime"):
         # Preserve the venv entry point even when it is a symlink to the base Python.
         parser.add_argument(f"--{name}", type=lambda value: Path(value).expanduser().absolute(), required=True)
@@ -296,7 +308,7 @@ def main():
     from run_baseline import build_prompt, compare
     from run_pipeline_suite import select_inputs
 
-    snapshot = json.loads(args.snapshot.read_text())
+    active = active_version(args.graph_url, os.environ.get("TEXT2SQL_MCP_TOKEN", ""))
     frozen = json.loads((args.study / "evals/combined/manifest.v0.3.json").read_text())
     db = args.study / "data/olist.db"
     assert sha256(db.read_bytes()).hexdigest() == frozen["db_sha256"]
@@ -307,8 +319,8 @@ def main():
     provider_info = provider.preflight()
     provider_info["tool_policy"] = "allowlisted local Graph and t2s tools; DB result rows withheld"
     items = select_inputs(args.ids)
-    plugins = {"nov22": args.old_plugin, "updated": args.new_plugin}
-    identity = {"provider": provider_info, "version": snapshot["version_id"], "db": frozen["db_sha256"],
+    plugins = {**({"old": args.old_plugin} if args.old_plugin else {}), "updated": args.new_plugin}
+    identity = {"provider": provider_info, "version": active["version_id"], "db": frozen["db_sha256"],
                 "ids": [i["id"] for i in items], "max_attempts": MAX_ATTEMPTS,
                 "sqlite": subprocess.check_output([str(args.runtime), "-c", "import sqlite3; print(sqlite3.sqlite_version)"], text=True).strip(),
                 "source_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -329,7 +341,7 @@ def main():
     def run(job):
         arm, item = job
         try:
-            record = generate(args, item, plugins[arm], snapshot, provider, build_prompt(answer_free(item)))
+            record = generate(args, item, plugins[arm], active, provider, build_prompt(answer_free(item)))
             attempts = record.pop("attempts")
             final = record.pop("final")
             def grade(result):
@@ -352,9 +364,9 @@ def main():
             else:
                 append_record(path, record)
                 completed[(record["arm"], record["id"])] = record
-            print(len(completed), "/", len(items) * 2, record["arm"], record["id"],
+            print(len(completed), "/", len(items) * len(plugins), record["arm"], record["id"],
                   record.get("infrastructure_error") or record["score"][0], flush=True)
-    if len(completed) != len(items) * 2:
+    if len(completed) != len(items) * len(plugins):
         raise SystemExit("Incomplete run. Rerun the same command to resume.")
     for arm in plugins:
         group = [r for (label, _), r in completed.items() if label == arm]
